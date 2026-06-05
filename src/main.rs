@@ -1,21 +1,61 @@
-use actix_web::{App, HttpRequest, HttpResponse, HttpServer, web};
+use actix_web::{body, web, App, HttpRequest, HttpResponse, HttpServer};
+use base62::encode;
+use serde::Deserialize;
+use sqlx::PgPool;
+use serde_json;
+use std::env; //env::var("var") it gets the value of the variable in the .env file
+use dotenv::dotenv; // loads the .env file
 
 
-
-pub async fn shorten(_req: HttpRequest) -> HttpResponse {
-    print!("inside handler function ");
-    HttpResponse::Ok().finish()
+//we will send the post req body as a json obj
+#[derive(Deserialize)]
+pub struct ShortenRequest {
+   pub url: String,
 }
+
+pub async fn shorten(
+    body: web::Json<ShortenRequest>,
+    pool: web::Data<PgPool> 
+    ) -> Result<HttpResponse, actix_web::Error> {
+
+    let url = &body.url;
+    let row = sqlx::query!(
+        "insert into urls (short_code, original_url) values ('', $1) returning id ", url
+        ).fetch_one(pool.get_ref()).await.map_err(actix_web::error::ErrorInternalServerError)?;
+
+    let short_code = encode(row.id as u128);
+
+    let result= sqlx::query!("update urls set short_code = $1 where id = $2", short_code, row.id)
+        .execute(pool.get_ref())
+        .await
+        .map_err(actix_web::error::ErrorInternalServerError)?;
+
+    println!("shortened: {} -> {}", url, short_code);
+
+    Ok(HttpResponse::Ok().json(serde_json::json!({
+        "short_code": short_code,
+        "original_url": url,
+    })))
+}
+
 
 #[tokio::main]
 async fn main() -> Result<(), std::io::Error> {
-     let _ = HttpServer::new(||{
-         App::new()
-             .route("/", web::post().to(shorten))
-         
-     })
-    .bind("localhost:8000")?
-    .run().await;
-     Ok(())
 
+    dotenv::dotenv().ok();
+    let database_url = env::var("DATABASE_URL").expect("DATABASE_URL must be set");
+    let pool = PgPool::connect(&database_url)
+        .await
+        .expect("Failed to connect to the database");
+    
+    HttpServer::new(move || {
+        App::new()
+            .app_data(web::Data::new(pool.clone()))
+            .route("/", web::post().to(shorten))
+            .route("/{short_code}",web::get().to(redirect))
+    })
+    .bind("localhost:8000")?
+    .run()
+    .await?;
+    Ok(())
 }
