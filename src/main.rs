@@ -38,7 +38,20 @@ pub async fn shorten(
     })))
 }
 
-
+pub async fn redirect(
+    path: web::Path<String>,
+    pool: web::Data<PgPool>
+) -> Result<HttpResponse, actix_web::Error> {
+    let short_code = path.into_inner();
+    let row = sqlx::query!("select original_url from urls where short_code = $1", short_code)
+        .fetch_one(pool.get_ref())
+        .await
+        .map_err(actix_web::error::ErrorInternalServerError)?;
+    Ok(HttpResponse::TemporaryRedirect().insert_header(("Location", row.original_url)).finish()) 
+    //.insert_header(("Location", row.original_url)): For a redirect to work, the HTTP response must include a Location header telling the browser where to go. This injects the original URL we grabbed from the database.
+    //A 307 (or 302) is ideal for URL shorteners because it tells the browser: "Go to this new URL for now, but don't cache this choice forever. Next time, ask my server again." This lets you track analytics on every click.
+}  
+ 
 #[tokio::main]
 async fn main() -> Result<(), std::io::Error> {
 
