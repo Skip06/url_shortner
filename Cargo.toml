@@ -2,7 +2,9 @@
 name = "url_shortner"
 version = "0.1.0"
 edition = "2024"
-
+[lib]
+name = "url_shortner"
+path = "src/lib.rs"
 [dependencies]
 actix-web = "4"
 base62 = "2.2.4"
