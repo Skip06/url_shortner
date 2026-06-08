@@ -63,11 +63,14 @@ pub async fn redirect(
     // 2. If not in cache, get from database
     let row = sqlx::query("select original_url from urls where short_code = $1")
         .bind(&short_code)
-        .fetch_one(pool.get_ref())
+        .fetch_optional(pool.get_ref())
         .await
         .map_err(actix_web::error::ErrorInternalServerError)?;
 
-    let original_url: String = row.get("original_url");
+    let original_url: String = match row{   // need to specify String o/w r.get() can return many different types depending on what you ask for
+        Some(r) => r.get("original_url"),
+        None => return Ok(HttpResponse::NotFound().body("Shortcode not found"))
+    };
 
     // 3. Save to cache for future requests
     cache::set_cached_url(cache_pool.get_ref(), &short_code, &original_url).await;

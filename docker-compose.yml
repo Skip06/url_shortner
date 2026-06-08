@@ -1,4 +1,20 @@
 services:
+  redis:
+    image: redis:7-alpine
+    container_name: url_shortner_redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+
+  frontend:
+    image: nginx:alpine
+    container_name: url_shortner_frontend
+    ports:
+      - "3000:80"
+    volumes:
+      - ./frontend:/usr/share/nginx/html:ro
+    restart: unless-stopped
+
   db:
     image: postgres:16-alpine
     container_name: url_shortner_db
