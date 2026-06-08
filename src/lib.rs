@@ -1,13 +1,12 @@
-use actix_web::{body, web, App, HttpRequest, HttpResponse, HttpServer};
+use actix_web::{web, HttpResponse};
 use base62::encode;
 use serde::Deserialize;
-use sqlx::PgPool;
-use serde_json;
-use std::env; //env::var("var") it gets the value of the variable in the .env file
-use dotenv::dotenv; // loads the .env file
+use sqlx::{PgPool, Row};
+use deadpool_redis::Pool as RedisPool;
+
+pub mod cache;
 
 
-//we will send the post req body as a json obj
 #[derive(Deserialize)]
 pub struct ShortenRequest {
    pub url: String,
@@ -15,17 +14,24 @@ pub struct ShortenRequest {
 
 pub async fn shorten(
     body: web::Json<ShortenRequest>,
-    pool: web::Data<PgPool> 
+    pool: web::Data<PgPool>
     ) -> Result<HttpResponse, actix_web::Error> {
 
     let url = &body.url;
-    let row = sqlx::query!(
-        "insert into urls (short_code, original_url) values ('', $1) returning id ", url
-        ).fetch_one(pool.get_ref()).await.map_err(actix_web::error::ErrorInternalServerError)?;
+    let row = sqlx::query(
+        "insert into urls (short_code, original_url) values ('', $1) returning id"
+    )
+    .bind(url) 
+    .fetch_one(pool.get_ref()) //gives Result of one row from the db
+    .await
+    .map_err(actix_web::error::ErrorInternalServerError)?;
 
-    let short_code = encode(row.id as u128);
+    let id: i64 = row.get("id");
+    let short_code = encode(id as u128);
 
-    let result= sqlx::query!("update urls set short_code = $1 where id = $2", short_code, row.id)
+    sqlx::query("update urls set short_code = $1 where id = $2")
+        .bind(&short_code) // insertin the $1 value 
+        .bind(id)
         .execute(pool.get_ref())
         .await
         .map_err(actix_web::error::ErrorInternalServerError)?;
@@ -39,16 +45,35 @@ pub async fn shorten(
 }
 
 pub async fn redirect(
-    path: web::Path<String>,
-    pool: web::Data<PgPool>
+    path: web::Path<String>, 
+    pool: web::Data<PgPool>,
+    cache_pool: web::Data<RedisPool>
 ) -> Result<HttpResponse, actix_web::Error> {
     let short_code = path.into_inner();
-    let row = sqlx::query!("select original_url from urls where short_code = $1", short_code)
+
+    
+    // 1. Try to get from cache
+    if let Some(original_url) = cache::get_cached_url(cache_pool.get_ref(), &short_code).await {
+        println!("cache hit: {} -> {}", short_code, original_url);
+        return Ok(HttpResponse::TemporaryRedirect()
+            .insert_header(("Location", original_url))
+            .finish());
+    }
+
+    // 2. If not in cache, get from database
+    let row = sqlx::query("select original_url from urls where short_code = $1")
+        .bind(&short_code)
         .fetch_one(pool.get_ref())
         .await
         .map_err(actix_web::error::ErrorInternalServerError)?;
-    Ok(HttpResponse::TemporaryRedirect().insert_header(("Location", row.original_url)).finish()) 
-    //.insert_header(("Location", row.original_url)): For a redirect to work, the HTTP response must include a Location header telling the browser where to go. This injects the original URL we grabbed from the database.
-    //A 307 (or 302) is ideal for URL shorteners because it tells the browser: "Go to this new URL for now, but don't cache this choice forever. Next time, ask my server again." This lets you track analytics on every click.
-}  
 
+    let original_url: String = row.get("original_url");
+
+    // 3. Save to cache for future requests
+    cache::set_cached_url(cache_pool.get_ref(), &short_code, &original_url).await;
+    println!("cache miss: {} -> {}. saved to cache.", short_code, original_url);
+
+    Ok(HttpResponse::TemporaryRedirect()
+        .insert_header(("Location", original_url))
+        .finish())
+}
